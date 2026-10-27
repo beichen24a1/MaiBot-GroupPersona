@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.beichen24a1.group-persona",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "分群人格",
   "description": "让麦麦在不同群里是不同的人：按群覆盖人设与行为风格，记忆、表达与上下文本来就已经按群隔离，本插件只补上人格这一层。",
   "author": {
@@ -30,9 +30,13 @@
       "value": "users"
     }
   },
-  "capabilities": ["chat.get_all_streams"],
+  "capabilities": [
+    "chat.get_all_streams"
+  ],
   "i18n": {
     "default_locale": "zh-CN",
-    "supported_locales": ["zh-CN"]
+    "supported_locales": [
+      "zh-CN"
+    ]
   }
 }

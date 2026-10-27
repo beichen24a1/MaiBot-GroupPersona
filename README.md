@@ -37,26 +37,26 @@ git clone https://github.com/beichen24a1/MaiBot-GroupPersona.git
 
 ## 配置
 
-把 `personas.example.toml` 复制成 `personas.toml`，按群填写（key 是 **QQ 群号**）：
+## 配置（WebUI）
 
-```toml
-[persona."1104218530"]
-name = "御姐形态"
-personality = "你是个二十七八岁的成熟女人，说话干脆、有主见，偶尔毒舌但不刻薄。"
-behavior_style = "别人问你问题时先给结论再解释；不主动撒娇。"
+启用插件后，在 **WebUI → 插件扩展 → 分群人格 → 配置** 里就能直接增删改，不用手改文件。
 
-[persona."1063132902"]
-name = "软妹形态"
-personality = "你是个刚上大学的小姑娘，说话软软的，容易害羞。"
-behavior_style = "多使用短句和语气词；被夸会不好意思。"
-reply_style = "常用语气：呀、啦、呜；禁止客服腔。"   # 可选：说话方式
-examples = """                                       # 可选：示例对话
-群友：你好可爱 → 你：诶嘿 真的吗
-"""
-```
+| 配置 | 说明 |
+| --- | --- |
+| `plugin.enabled` | 总开关，关闭后所有群都用全局人格 |
+| `personas` | 群人格列表，可加任意多个群 |
+
+每个群一条，字段：`group_id`（群号）/ `name`（识别用）/ `enabled` / `personality`（人设）/
+`behavior_style`（行动准则）/ `reply_style`（说话方式）/ `examples`（示例对话）。
+保存后插件自动重新加载，重启也不丢。
+
+### 兼容：手写 personas.toml
+
+不想用 WebUI 的话，也可以在插件目录放 `personas.toml`（格式见 `personas.example.toml`）。
+**WebUI 的 `personas` 填了条目时以 WebUI 为准**，只有 WebUI 为空才读这个文件，
+所以从旧版升级上来的部署不会丢配置。
 
 - **没配置的群**继续使用 `bot_config.toml` 里的全局人格
-- 改完 `personas.toml` 后在 WebUI 重载插件，或重启 core
 - 插件会自己把 `session_id`（一串哈希）映射到群号，启动时拉一次，遇到新群自动刷新
 
 ## 工作方式

@@ -5,15 +5,11 @@ MaiBot 的长期记忆（A_Memorix，按 chat_id）、表达方式（expression_
 本插件只补最后一层：按群覆盖人设 / 行为风格。
 
 实现：
-- 订阅 ``maisaka.planner.before_request``：按 session_id 找到本群人格，替换 Context Items 中的 system 人设
+- 订阅 ``maisaka.planner.before_request``：按 session_id 找到本群人格，追加到 Context Items 的 system 项
 - 订阅 ``maisaka.replyer.before_request``：同一人格以 extra_prompt 追加，保证成稿也符合本群身份
 
-配置：插件目录下的 ``personas.toml``（不存在时读 ``personas.example.toml``）::
-
-    [persona."1104218530"]
-    name = "御姐形态"
-    personality = "你叫XX，是……"
-    behavior_style = "……"
+配置：WebUI 插件配置页（本文件的 ``GroupPersonaConfig`` 自动生成表单）。
+为了兼容旧部署，也支持插件目录下的 ``personas.toml`` —— 但 WebUI 里填了条目时以 WebUI 为准。
 """
 from __future__ import annotations
 
@@ -21,7 +17,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from maibot_sdk import HookHandler, MaiBotPlugin
+from pydantic import Field
+
+from maibot_sdk import HookHandler, MaiBotPlugin, PluginConfigBase
 from maibot_sdk.types import HookMode, HookOrder
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -31,8 +29,94 @@ EXAMPLE_FILE = PLUGIN_DIR / "personas.example.toml"
 log = logging.getLogger("maibot.plugin.group_persona")
 
 
-def _load_personas() -> dict[str, dict[str, Any]]:
-    """读取 ``[persona."<群号>"]`` 映射；文件缺失或损坏时返回空映射。"""
+# ------------------------------ 插件配置模型（WebUI 自动生成表单）------------------------------
+class PluginSection(PluginConfigBase):
+    """插件基础开关（宿主要求的 [plugin] 节）。"""
+
+    __ui_label__ = "插件开关"
+    __ui_icon__ = "toggle-left"
+    __ui_order__ = 0
+
+    enabled: bool = Field(
+        default=True,
+        description="关闭后插件不再改写人格，所有群都使用 bot_config.toml 的全局人格",
+        json_schema_extra={"label": "启用分群人格"},
+    )
+    config_version: str = Field(
+        default="1.0.0",
+        description="配置版本，升级插件时由宿主维护，一般不需要修改",
+        json_schema_extra={"label": "配置版本"},
+    )
+
+
+class PersonaEntry(PluginConfigBase):
+    """单个群的人格设定。"""
+
+    __ui_label__ = "群人格"
+
+    group_id: str = Field(
+        default="",
+        description="QQ 群号，例如 1063132902",
+        json_schema_extra={"label": "群号", "placeholder": "1063132902"},
+    )
+    name: str = Field(
+        default="",
+        description="给这套人格起的名字，方便识别，例如「大肥鱼群友」",
+        json_schema_extra={"label": "人格名称", "placeholder": "大肥鱼群友"},
+    )
+    enabled: bool = Field(
+        default=True,
+        description="关掉后这个群回落到全局人格",
+        json_schema_extra={"label": "启用"},
+    )
+    personality: str = Field(
+        default="",
+        description="这个群里的身份与人设：你是谁、什么形象、什么性格",
+        json_schema_extra={"label": "人设", "x-widget": "textarea", "rows": 4},
+    )
+    behavior_style: str = Field(
+        default="",
+        description="行动准则：怎么说、要不要接话、爱好与态度",
+        json_schema_extra={"label": "行为准则", "x-widget": "textarea", "rows": 5},
+    )
+    reply_style: str = Field(
+        default="",
+        description="说话方式：口头禅、打字习惯、禁用词（表情、客服腔等）",
+        json_schema_extra={"label": "说话方式", "x-widget": "textarea", "rows": 4},
+    )
+    examples: str = Field(
+        default="",
+        description="示例对话，一行一组，例如「群友：xxx → 你：yyy」",
+        json_schema_extra={"label": "示例对话", "x-widget": "textarea", "rows": 4},
+    )
+
+
+class GroupPersonaConfig(PluginConfigBase):
+    """分群人格总配置。"""
+
+    __ui_label__ = "分群人格"
+    __ui_icon__ = "users"
+    __ui_order__ = 0
+
+    plugin: PluginSection = Field(
+        default_factory=PluginSection,
+        description="插件基础开关",
+        json_schema_extra={"label": "插件开关"},
+    )
+    personas: list[PersonaEntry] = Field(
+        default_factory=list,
+        description="按群配置人格；没在这里出现的群继续用全局人格",
+        json_schema_extra={"label": "群人格列表"},
+    )
+
+
+# 文件顶部用了 ``from __future__ import annotations``，嵌套模型需要显式重建
+GroupPersonaConfig.model_rebuild()
+
+
+# ------------------------------ 工具函数 ------------------------------
+def _load_personas_from_file() -> dict[str, dict[str, Any]]:
+    """兼容旧配置：从 personas.toml 读取 ``[persona."<群号>"]``。"""
     path = PERSONAS_FILE if PERSONAS_FILE.exists() else EXAMPLE_FILE
     if not path.exists():
         return {}
@@ -50,6 +134,23 @@ def _load_personas() -> dict[str, dict[str, Any]]:
         if isinstance(value, dict):
             out[str(key).strip()] = value
     return out
+
+
+def _entry_to_dict(entry: Any) -> dict[str, Any]:
+    """把 WebUI 配置里的一条人格转成内部 dict。"""
+
+    def _get(name: str) -> str:
+        if isinstance(entry, dict):
+            return str(entry.get(name) or "").strip()
+        return str(getattr(entry, name, "") or "").strip()
+
+    return {
+        "name": _get("name"),
+        "personality": _get("personality"),
+        "behavior_style": _get("behavior_style"),
+        "reply_style": _get("reply_style"),
+        "examples": _get("examples"),
+    }
 
 
 def _persona_prompt(persona: dict[str, Any]) -> str:
@@ -73,25 +174,6 @@ def _persona_prompt(persona: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _item_text(item: Any) -> str:
-    """从一个 Context Item 里取出全部文本，兼容 dict / 对象两种形态。"""
-    texts: list[str] = []
-
-    def _walk(parts: Any) -> None:
-        if not isinstance(parts, list):
-            return
-        for part in parts:
-            if isinstance(part, dict):
-                if part.get("type") == "text" and part.get("text"):
-                    texts.append(str(part["text"]))
-
-    if isinstance(item, dict):
-        _walk(item.get("parts"))
-    else:
-        _walk(getattr(item, "parts", None))
-    return "\n".join(texts)
-
-
 def _is_system_item(item: Any) -> bool:
     if isinstance(item, dict):
         it = str(item.get("item_type") or "")
@@ -101,24 +183,53 @@ def _is_system_item(item: Any) -> bool:
 
 
 class GroupPersonaPlugin(MaiBotPlugin):
+    config_model = GroupPersonaConfig
+
     def __init__(self) -> None:
         super().__init__()
         self._personas: dict[str, dict[str, Any]] = {}
+        self._personas_enabled: bool = True
         # session_id -> group_id，懒加载并在 miss 时刷新
         self._session_to_group: dict[str, str] = {}
 
+    def _reload_personas(self) -> None:
+        """优先读 WebUI 配置；没有任何条目时兼容旧的 personas.toml。"""
+        cfg = getattr(self, "config", None)
+        plugin_section = getattr(cfg, "plugin", None) if cfg is not None else None
+        if plugin_section is not None:
+            self._personas_enabled = bool(getattr(plugin_section, "enabled", True))
+        else:
+            self._personas_enabled = bool(getattr(cfg, "enabled", True)) if cfg is not None else True
+        personas: dict[str, dict[str, Any]] = {}
+        entries = getattr(cfg, "personas", None) if cfg is not None else None
+        if entries:
+            for entry in entries:
+                if not bool(getattr(entry, "enabled", True)):
+                    continue
+                gid = str(getattr(entry, "group_id", "") or "").strip()
+                if gid:
+                    personas[gid] = _entry_to_dict(entry)
+        source = "WebUI"
+        if not personas:
+            personas = _load_personas_from_file()
+            source = "personas.toml（兼容）"
+        self._personas = personas
+        log.info(
+            "分群人格已加载（来源=%s，总开关=%s），已配置群: %s",
+            source,
+            "开" if self._personas_enabled else "关",
+            ", ".join(sorted(personas)) or "（无，全部走全局人格）",
+        )
+
     async def on_load(self) -> None:
-        self._personas = _load_personas()
-        groups = ", ".join(sorted(self._personas)) or "（无，全部走全局人格）"
-        log.info("分群人格已加载，已配置群: %s", groups)
+        self._reload_personas()
         await self._refresh_streams()
 
     async def on_unload(self) -> None:
         return None
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
-        self._personas = _load_personas()
-        log.info("分群人格配置已重新加载，群数=%d", len(self._personas))
+        self._reload_personas()
 
     async def _refresh_streams(self) -> None:
         """从宿主拉一次 session_id -> group_id 映射。"""
@@ -144,11 +255,10 @@ class GroupPersonaPlugin(MaiBotPlugin):
 
     async def _persona_for(self, session_id: str) -> dict[str, Any] | None:
         """按 session_id 找本群人格；找不到返回 None（走全局）。"""
-        if not self._personas:
+        if not self._personas_enabled or not self._personas:
             return None
         gid = self._session_to_group.get(session_id)
         if gid is None:
-            # 新群第一次出现时刷新一次
             await self._refresh_streams()
             gid = self._session_to_group.get(session_id)
         if gid is None:
@@ -177,7 +287,6 @@ class GroupPersonaPlugin(MaiBotPlugin):
         new_items: list[Any] = []
         for item in items:
             if not replaced and _is_system_item(item):
-                # 把本群人设追加到 system 项里：只加不改，避免破坏宿主注入的其它规则
                 if isinstance(item, dict):
                     parts = item.setdefault("parts", [])
                     if isinstance(parts, list):
@@ -215,7 +324,6 @@ class GroupPersonaPlugin(MaiBotPlugin):
             return None
         prompt = _persona_prompt(persona) + "\n（若与系统默认人设冲突，一律以本群身份为准。）"
         log.debug("分群人格：replyer 注入 session=%s persona=%s", session_id, persona.get("name") or "")
-        # extra_prompt 是追加语义：宿主会把它拼进本次 replyer 的提示词
         return {"extra_prompt": prompt}
 
 

@@ -57,13 +57,19 @@ def _persona_prompt(persona: dict[str, Any]) -> str:
     name = str(persona.get("name") or "").strip()
     personality = str(persona.get("personality") or "").strip()
     behavior = str(persona.get("behavior_style") or "").strip()
+    reply_style = str(persona.get("reply_style") or "").strip()
+    examples = str(persona.get("examples") or "").strip()
     parts = ["【本群身份】下面这段设定覆盖你的默认人设，在本群请完全按它来。"]
     if name:
         parts.append(f"你的名字/形态：{name}")
     if personality:
         parts.append(f"你的人设：{personality}")
     if behavior:
-        parts.append(f"你的行为风格：{behavior}")
+        parts.append(f"你的行为准则：{behavior}")
+    if reply_style:
+        parts.append(f"你的说话方式：{reply_style}")
+    if examples:
+        parts.append(f"参考示例：\n{examples}")
     return "\n".join(parts)
 
 

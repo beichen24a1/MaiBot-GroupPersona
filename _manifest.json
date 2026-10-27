@@ -1,0 +1,38 @@
+{
+  "manifest_version": 2,
+  "id": "github.beichen24a1.group-persona",
+  "version": "0.1.0",
+  "name": "分群人格",
+  "description": "让麦麦在不同群里是不同的人：按群覆盖人设与行为风格，记忆、表达与上下文本来就已经按群隔离，本插件只补上人格这一层。",
+  "author": {
+    "name": "beichen24a1",
+    "url": "https://github.com/beichen24a1"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/beichen24a1/MaiBot-GroupPersona",
+    "homepage": "https://github.com/beichen24a1/MaiBot-GroupPersona",
+    "issues": "https://github.com/beichen24a1/MaiBot-GroupPersona/issues"
+  },
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.10.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "plugin_type": "tool",
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "users"
+    }
+  },
+  "capabilities": ["chat.get_all_streams"],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}

@@ -5,15 +5,17 @@ MaiBot 的长期记忆（A_Memorix，按 chat_id）、表达方式（expression_
 本插件只补最后一层：按群覆盖人设 / 行为风格。
 
 实现：
-- 订阅 ``maisaka.planner.before_request``：按 session_id 找到本群人格，追加到 Context Items 的 system 项
-- 订阅 ``maisaka.replyer.before_request``：同一人格以 extra_prompt 追加，保证成稿也符合本群身份
+- 订阅 ``maisaka.planner.before_request``：按 session_id 找到本群人格，追加到有 system 项的 items
+- 订阅 ``maisaka.replyer.before_request``：同一人格以 ``extra_prompt`` 注入（经 modified_kwargs）
 
 配置：WebUI 插件配置页（本文件的 ``GroupPersonaConfig`` 自动生成表单）。
-为了兼容旧部署，也支持插件目录下的 ``personas.toml`` —— 但 WebUI 里填了条目时以 WebUI 为准。
+为了兼容旧部署，也支持插件目录下的 ``personas.toml``——但 WebUI 里填了条目时以 WebUI 为准。
+``personas.example.toml`` 仅作文档，不会被当作真实配置加载。
 """
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,9 @@ from maibot_sdk.types import HookMode, HookOrder
 PLUGIN_DIR = Path(__file__).resolve().parent
 PERSONAS_FILE = PLUGIN_DIR / "personas.toml"
 EXAMPLE_FILE = PLUGIN_DIR / "personas.example.toml"
+
+# 会话映射全量刷新的最小间隔（秒），避免每条未命中消息都打一次 RPC
+STREAM_REFRESH_INTERVAL = 60.0
 
 log = logging.getLogger("maibot.plugin.group_persona")
 
@@ -116,14 +121,17 @@ GroupPersonaConfig.model_rebuild()
 
 # ------------------------------ 工具函数 ------------------------------
 def _load_personas_from_file() -> dict[str, dict[str, Any]]:
-    """兼容旧配置：从 personas.toml 读取 ``[persona."<群号>"]``。"""
-    path = PERSONAS_FILE if PERSONAS_FILE.exists() else EXAMPLE_FILE
-    if not path.exists():
+    """兼容旧配置：从 personas.toml 读取 ``[persona."<群号>"]``。
+
+    只在**真实**的 ``personas.toml`` 存在时才读。``personas.example.toml`` 仅作文档，
+    否则全新安装会把示例里的群号当成已配置人格注入。
+    """
+    if not PERSONAS_FILE.exists():
         return {}
     try:
         import tomllib
 
-        with path.open("rb") as fh:
+        with PERSONAS_FILE.open("rb") as fh:
             data = tomllib.load(fh)
     except Exception as exc:  # noqa: BLE001
         log.warning("读取 personas.toml 失败: %s", exc)
@@ -189,8 +197,9 @@ class GroupPersonaPlugin(MaiBotPlugin):
         super().__init__()
         self._personas: dict[str, dict[str, Any]] = {}
         self._personas_enabled: bool = True
-        # session_id -> group_id，懒加载并在 miss 时刷新
+        # session_id -> group_id，懒加载并在 miss 时按节流刷新
         self._session_to_group: dict[str, str] = {}
+        self._last_stream_refresh: float = 0.0
 
     def _reload_personas(self) -> None:
         """优先读 WebUI 配置；没有任何条目时兼容旧的 personas.toml。"""
@@ -233,6 +242,7 @@ class GroupPersonaPlugin(MaiBotPlugin):
 
     async def _refresh_streams(self) -> None:
         """从宿主拉一次 session_id -> group_id 映射。"""
+        self._last_stream_refresh = time.monotonic()
         try:
             result = await self.ctx.chat.get_all_streams()
         except Exception as exc:  # noqa: BLE001
@@ -251,7 +261,7 @@ class GroupPersonaPlugin(MaiBotPlugin):
                 mapping[sid] = gid
         if mapping:
             self._session_to_group = mapping
-            log.info("分群人格：已建立 %d 个会话映射 %s", len(mapping), mapping)
+            log.debug("分群人格：已建立 %d 个会话映射 %s", len(mapping), mapping)
 
     async def _persona_for(self, session_id: str) -> dict[str, Any] | None:
         """按 session_id 找本群人格；找不到返回 None（走全局）。"""
@@ -259,8 +269,10 @@ class GroupPersonaPlugin(MaiBotPlugin):
             return None
         gid = self._session_to_group.get(session_id)
         if gid is None:
-            await self._refresh_streams()
-            gid = self._session_to_group.get(session_id)
+            # 未命中时按间隔刷新，避免私聊/未配置群每条消息都全量打 RPC
+            if time.monotonic() - self._last_stream_refresh >= STREAM_REFRESH_INTERVAL:
+                await self._refresh_streams()
+                gid = self._session_to_group.get(session_id)
         if gid is None:
             return None
         return self._personas.get(gid)
@@ -278,35 +290,36 @@ class GroupPersonaPlugin(MaiBotPlugin):
         persona = await self._persona_for(session_id)
         if persona is None:
             return None
-        prompt = _persona_prompt(persona)
         items = kwargs.get("items")
         if not isinstance(items, list):
             return None
 
-        replaced = False
-        new_items: list[Any] = []
+        prompt = _persona_prompt(persona)
+        injected = False
         for item in items:
-            if not replaced and _is_system_item(item):
-                if isinstance(item, dict):
-                    parts = item.setdefault("parts", [])
-                    if isinstance(parts, list):
-                        parts.append({"type": "text", "text": "\n\n" + prompt})
-                else:
-                    try:
-                        item.parts.append({"type": "text", "text": "\n\n" + prompt})
-                    except Exception:  # noqa: BLE001
-                        pass
-                replaced = True
-            new_items.append(item)
+            if not _is_system_item(item):
+                continue
+            if isinstance(item, dict):
+                parts = item.setdefault("parts", [])
+                if isinstance(parts, list):
+                    parts.append({"type": "text", "text": "\n\n" + prompt})
+                    injected = True
+            else:
+                try:
+                    item.parts.append({"type": "text", "text": "\n\n" + prompt})
+                    injected = True
+                except Exception:  # noqa: BLE001
+                    pass
+            break
 
-        if not replaced:
-            new_items.insert(0, {
-                "item_type": "SystemMessageItem",
-                "parts": [{"type": "text", "text": prompt}],
-            })
+        if not injected:
+            # 没有 system 项时不插入新 item：新建 item 缺 meta（item_id / logical_turn_id /
+            # timestamp）会被宿主丢弃并打 warning，属于无效修改，这里直接跳过
+            log.debug("分群人格：planner 未找到可注入的 system 项，跳过 session=%s", session_id)
+            return None
 
         log.debug("分群人格：planner 注入完成 session=%s persona=%s", session_id, persona.get("name") or "")
-        kwargs["items"] = new_items
+        kwargs["items"] = items
         return {"action": "continue", "modified_kwargs": kwargs}
 
     # ---------------------------------------------------------------- replyer
@@ -324,7 +337,9 @@ class GroupPersonaPlugin(MaiBotPlugin):
             return None
         prompt = _persona_prompt(persona) + "\n（若与系统默认人设冲突，一律以本群身份为准。）"
         log.debug("分群人格：replyer 注入 session=%s persona=%s", session_id, persona.get("name") or "")
-        return {"extra_prompt": prompt}
+        # 宿主只采纳 modified_kwargs，裸返回 extra_prompt 会被 HookDispatcher 直接丢掉
+        kwargs["extra_prompt"] = prompt
+        return {"action": "continue", "modified_kwargs": kwargs}
 
 
 def create_plugin() -> MaiBotPlugin:
